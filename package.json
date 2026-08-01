@@ -17,6 +17,7 @@
     "typescript": "^7.0.2"
   },
   "dependencies": {
+    "@google/genai": "^2.15.0",
     "axios": "^1.19.0",
     "dotenv": "^17.4.2",
     "openai": "^7.3.0",

@@ -2,6 +2,8 @@ import { Agent } from "./agent/agent.js";
 import axios from "axios";
 import type { ITool } from "./agent/agent.js";
 import { z } from "zod";
+import { OpenAIModel } from "./model/openAIModel.js";
+import { GeminiModel } from "./model/geminiModel.js";
 
 const weatherTool: ITool<{ city: string }, { city: string, temperature: string }> = {
   name: "fetchWeatherInfo",
@@ -17,11 +19,26 @@ const weatherTool: ITool<{ city: string }, { city: string, temperature: string }
   },
 };
 
-const myAgent: Agent = Agent.builder()
+const openAIModelTest = new OpenAIModel()
+const geminiModelTest = new GeminiModel()
+
+// const myAgent1: Agent = Agent.builder()
+//   .setModel(geminiModelTest)
+//   .setInstructions("You are expert AI assistant")
+//   .tool(weatherTool)
+//   .build();
+
+// const response1 = await myAgent1.run("What is the weather in kolkata ?");
+
+// console.log(response1?.finalOutput);
+
+
+const myAgent2: Agent = Agent.builder()
+  .setModel(openAIModelTest)
   .setInstructions("You are expert AI assistant")
   .tool(weatherTool)
   .build();
 
-const response = await myAgent.run("What is the weather in kolkata ?");
+const response2 = await myAgent2.run("What is the weather in Bangalore ?");
 
-console.log(response?.finalOutput);
+console.log(response2?.finalOutput);

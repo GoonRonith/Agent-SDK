@@ -2,6 +2,8 @@ import "dotenv/config";
 import { HARNESS_PROMPT } from "./config.js";
 import OpenAI from "openai";
 import type { ZodSchema } from "zod";
+import { OpenAIModel } from "../model/openAIModel.js";
+import type { GeminiModel } from "../model/geminiModel.js";
 
 interface AgentResult {
   finalOutput: string;
@@ -21,9 +23,10 @@ export interface ITool<TInput, TResult> {
 interface IAgentConfig {
   instructions: string;
   tools: ITool<any, any>[];
+  model: OpenAIModel | GeminiModel | null;
 }
 
-interface IConversations {
+export interface IConversations {
   role: "user" | "assistant" | "system" | "developer";
   content: string;
 }
@@ -32,11 +35,17 @@ export class AgentBuilder {
   private agentConfig: IAgentConfig = {
     instructions: "",
     tools: [],
+    model: null,
   };
 
   constructor() {
     this.agentConfig.tools = [];
     this.agentConfig.instructions = "";
+  }
+
+  public setModel(model: OpenAIModel | GeminiModel) {
+    this.agentConfig.model = model;
+    return this;
   }
 
   public setInstructions(instructions: string) {
@@ -96,24 +105,46 @@ export class Agent {
       currentIteration <= this.MAX_ITERATION;
       currentIteration++
     ) {
-      const llmResponse = await this.openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          { role: "system", content: this.instructions },
-          ...this.conversations.map((conversation) => ({
-            role: conversation.role,
-            content: conversation.content,
-          })),
-        ],
-      });
+      if (!this.agentConfig.model) {
+        throw new Error("Model is not set");
+      }
+      const rawLLMResponse = (await this.agentConfig.model.generate(
+        this.conversations,
+        this.instructions,
+      )) as string;
 
-      const rawLLMResponse: string = llmResponse.choices[0]?.message
-        .content as string;
+      // console.log("Raw LLM Response:", rawLLMResponse);
 
       this.conversations.push({ role: "assistant", content: rawLLMResponse });
+      let parsedLLMResponse = null;
+      try {
+        const response = JSON.parse(rawLLMResponse);
+        parsedLLMResponse = response;
+      } catch (error) {
+        // console.log(
+          // "Initial JSON parsing failed, attempting to extract JSON from response",
+        // );
 
-      const parsedLLMResponse = JSON.parse(rawLLMResponse);
-      console.log(parsedLLMResponse);
+        // Try to extract JSON from markdown code blocks or other text
+        const jsonMatch =
+          rawLLMResponse.match(/```(?:json)?\s*([\s\S]*?)```/) ||
+          rawLLMResponse.match(/\{[\s\S]*\}/);
+
+        if (jsonMatch) {
+          try {
+            const extractedJson = jsonMatch[1] || jsonMatch[0];
+            parsedLLMResponse = JSON.parse(extractedJson);
+            // console.log("Successfully extracted JSON from response");
+          } catch (innerError) {
+            // console.error("Failed to parse extracted JSON:", innerError);
+            throw new Error("Could not parse response as JSON");
+          }
+        } else {
+          // console.error("No JSON found in response:", rawLLMResponse);
+          throw new Error("Response is not valid JSON");
+        }
+      }
+      // console.log("Parsed LLM Response:", parsedLLMResponse);
       if (parsedLLMResponse.step.toLowerCase() === "output") {
         const result: AgentResult = {
           finalOutput: parsedLLMResponse.text,
@@ -125,7 +156,7 @@ export class Agent {
       }
 
       if (parsedLLMResponse.step.toLowerCase() === "tool_request") {
-        console.log("inside tool request block");
+        // console.log("inside tool request block");
 
         const { functionName, input } = parsedLLMResponse;
         const tool = this.toolMapping.get(functionName);
@@ -153,12 +184,12 @@ export class Agent {
             continue;
           }
           const toolResult = await tool.executor(parsed.data);
-          console.log(toolResult);
+          // console.log(toolResult);
 
           this.conversations.push({
             role: "developer",
             content: JSON.stringify({
-              success:true,
+              success: true,
               functionName,
               input,
               toolResult,
@@ -167,7 +198,7 @@ export class Agent {
         } catch (error) {
           const errorMessage =
             error instanceof Error ? error.message : String(error);
-          console.log("Tool Error", errorMessage);
+          // console.log("Tool Error", errorMessage);
           this.conversations.push({
             role: "developer",
             content: JSON.stringify({
@@ -181,7 +212,7 @@ export class Agent {
         }
       }
 
-      if(currentIteration === this.MAX_ITERATION) {
+      if (currentIteration === this.MAX_ITERATION) {
         const result: AgentResult = {
           finalOutput: "Max Iteration Reached",
           messages: this.conversations,
@@ -190,6 +221,11 @@ export class Agent {
         };
         return result;
       }
+
+      this.conversations.push({
+        role: "user",
+        content: "Continue with the next pipeline step.",
+      });
     }
   }
 }
