@@ -1,17 +1,19 @@
 import "dotenv/config";
 import { HARNESS_PROMPT } from "./config.js";
 import OpenAI from "openai";
+import type { ZodSchema } from "zod";
 
-export interface ITool {
+export interface ITool<TInput, TResult> {
   name: string;
   desc: string;
   doc?: string;
-  executor: (input: string) => Promise<string>;
+  inputSchema: ZodSchema<TInput>;
+  executor: (input: TInput) => Promise<TResult>;
 }
 
 interface IAgentConfig {
   instructions: string;
-  tools: ITool[];
+  tools: ITool<any, any>[];
 }
 
 interface IConversations {
@@ -35,7 +37,7 @@ export class AgentBuilder {
     return this;
   }
 
-  public tool(tool: ITool) {
+  public tool<TInput, TResult>(tool: ITool<TInput, TResult>) {
     this.agentConfig.tools.push(tool);
     return this;
   }
@@ -49,7 +51,7 @@ export class Agent {
   private instructions: string;
   private openai: OpenAI;
   private conversations: IConversations[];
-  private toolMapping: Map<string, ITool>;
+  private toolMapping: Map<string, ITool<any, any>>;
   private MAX_ITERATION = 30;
 
   constructor(private agentConfig: IAgentConfig) {
@@ -64,7 +66,7 @@ export class Agent {
         ${agentConfig.instructions}
 
         Available Tools:
-        ${agentConfig.tools.map((t) => JSON.stringify({ functionName: t.name, functionDescription: t.desc, functionDoc: t.doc })).join("\n")}
+        ${agentConfig.tools.map((t) => JSON.stringify({ functionName: t.name, functionDescription: t.desc, functionDoc: t.doc,inputSchema:t.inputSchema })).join("\n")}
     `;
 
     this.conversations = [];
@@ -109,6 +111,8 @@ export class Agent {
         return this.conversations;
 
       if (parsedLLMResponse.step.toLowerCase() === "tool_request") {
+        console.log("inside tool request block");
+        
         const { functionName, input } = parsedLLMResponse;
         const tool = this.toolMapping.get(functionName);
         if (!tool) {
@@ -119,7 +123,15 @@ export class Agent {
           continue;
         }
         try {
-          const toolResult = await tool.executor(input);
+          const parsed = tool.inputSchema.safeParse(input);
+          if (!parsed.success) {
+            console.log("parsing error");
+            
+            throw new Error(parsed.error.message);
+          }
+          const toolResult = await tool.executor(parsed.data);
+          console.log(toolResult);
+          
           this.conversations.push({
             role: "developer",
             content: JSON.stringify({
