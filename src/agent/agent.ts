@@ -3,6 +3,13 @@ import { HARNESS_PROMPT } from "./config.js";
 import OpenAI from "openai";
 import type { ZodSchema } from "zod";
 
+interface AgentResult {
+  finalOutput: string;
+  messages: IConversations[];
+  iterations: number;
+  stopReason: "completed" | "max_iterations";
+}
+
 export interface ITool<TInput, TResult> {
   name: string;
   desc: string;
@@ -66,7 +73,7 @@ export class Agent {
         ${agentConfig.instructions}
 
         Available Tools:
-        ${agentConfig.tools.map((t) => JSON.stringify({ functionName: t.name, functionDescription: t.desc, functionDoc: t.doc,inputSchema:t.inputSchema })).join("\n")}
+        ${agentConfig.tools.map((t) => JSON.stringify({ functionName: t.name, functionDescription: t.desc, functionDoc: t.doc, inputSchema: t.inputSchema })).join("\n")}
     `;
 
     this.conversations = [];
@@ -107,12 +114,19 @@ export class Agent {
 
       const parsedLLMResponse = JSON.parse(rawLLMResponse);
       console.log(parsedLLMResponse);
-      if (parsedLLMResponse.step.toLowerCase() === "output")
-        return this.conversations;
+      if (parsedLLMResponse.step.toLowerCase() === "output") {
+        const result: AgentResult = {
+          finalOutput: parsedLLMResponse.text,
+          messages: this.conversations,
+          iterations: currentIteration + 1,
+          stopReason: "completed",
+        };
+        return result;
+      }
 
       if (parsedLLMResponse.step.toLowerCase() === "tool_request") {
         console.log("inside tool request block");
-        
+
         const { functionName, input } = parsedLLMResponse;
         const tool = this.toolMapping.get(functionName);
         if (!tool) {
@@ -125,16 +139,26 @@ export class Agent {
         try {
           const parsed = tool.inputSchema.safeParse(input);
           if (!parsed.success) {
-            console.log("parsing error");
-            
-            throw new Error(parsed.error.message);
+            this.conversations.push({
+              role: "developer",
+              content: JSON.stringify({
+                success: false,
+                functionName,
+                input,
+                errorType: "ValidationError",
+                error: parsed.error.flatten(),
+              }),
+            });
+
+            continue;
           }
           const toolResult = await tool.executor(parsed.data);
           console.log(toolResult);
-          
+
           this.conversations.push({
             role: "developer",
             content: JSON.stringify({
+              success:true,
               functionName,
               input,
               toolResult,
@@ -146,9 +170,25 @@ export class Agent {
           console.log("Tool Error", errorMessage);
           this.conversations.push({
             role: "developer",
-            content: `Error: Tool Call Failed, error -> ${errorMessage}`,
+            content: JSON.stringify({
+              success: false,
+              functionName,
+              input,
+              errorType: "ExecutionError",
+              error: errorMessage,
+            }),
           });
         }
+      }
+
+      if(currentIteration === this.MAX_ITERATION) {
+        const result: AgentResult = {
+          finalOutput: "Max Iteration Reached",
+          messages: this.conversations,
+          iterations: currentIteration + 1,
+          stopReason: "max_iterations",
+        };
+        return result;
       }
     }
   }

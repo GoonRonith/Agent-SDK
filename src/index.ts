@@ -24,4 +24,4 @@ const myAgent: Agent = Agent.builder()
 
 const response = await myAgent.run("What is the weather in kolkata ?");
 
-console.log(response![response?.length! - 1]);
+console.log(response?.finalOutput);
