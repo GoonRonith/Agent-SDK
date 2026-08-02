@@ -36,19 +36,25 @@ const geminiModelTest = new GeminiModel();
 // console.log(response1?.finalOutput);
 
 const mathAgent: Agent = Agent.builder()
-  .setName('Math Agent')
+  .setName("Math Agent")
   .setModel(openAIModelTest)
   .setInstructions("You are expert AI assistant for Math problem solving")
   .build();
 
-const myAgent2: Agent = Agent.builder()
-  .setName('Main Agent')
+const weatherAgent: Agent = Agent.builder()
+  .setName("Weather Agent")
   .setModel(openAIModelTest)
-  .setHandOffs([mathAgent])
-  .setInstructions("You are expert AI assistant")
   .tool(weatherTool)
+  .setInstructions("You are expert AI assistant for fetching weather data")
   .build();
 
-const response2 = await myAgent2.run("What is the result of 2*21*3 ?");
+const myAgent2: Agent = Agent.builder()
+  .setName("Main Agent")
+  .setModel(openAIModelTest)
+  .setHandOffs([mathAgent, weatherAgent])
+  .setInstructions("You are expert AI assistant")
+  .build();
+
+const response2 = await myAgent2.run("What is the weather of kolkata ?");
 
 console.log(response2?.finalOutput);

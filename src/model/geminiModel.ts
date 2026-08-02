@@ -1,13 +1,16 @@
 import type { IModel } from "./baseModel.js";
 import type { IConversations } from "../agent/agent.js";
 import { GoogleGenAI } from "@google/genai";
+import { requireEnv } from "../utils/secrets.js";
+import { withRetry } from "../utils/reliability.js";
+import { ModelError } from "../utils/errors.js";
 
 export class GeminiModel implements IModel {
   private gemini: GoogleGenAI;
 
   constructor() {
     this.gemini = new GoogleGenAI({
-      apiKey: process.env.GEMINI_API_KEY || "",
+      apiKey: requireEnv("GEMINI_API_KEY"),
     });
   }
 
@@ -25,16 +28,24 @@ export class GeminiModel implements IModel {
       ],
     }));
 
-    const llmResponse = await this.gemini.models.generateContent({
-      model: "gemini-2.5-flash",
-      contents,
-      config: {
-        systemInstruction: instructions,
-      },
-    });
+    try {
+      const llmResponse = await withRetry(
+        () =>
+          this.gemini.models.generateContent({
+            model: "gemini-2.5-flash",
+            contents,
+            config: {
+              systemInstruction: instructions,
+            },
+          }),
+        { label: "Gemini generateContent", retries: 2, baseDelayMs: 500, timeoutMs: 30_000 },
+      );
 
-    return llmResponse.candidates?.[0]?.content?.parts?.[0]?.text as
-      | string
-      | undefined;
+      return llmResponse.candidates?.[0]?.content?.parts?.[0]?.text as
+        | string
+        | undefined;
+    } catch (error) {
+      throw new ModelError("Gemini model request failed", { operation: "generate", cause: error });
+    }
   }
 }

@@ -6,12 +6,15 @@ import type { ZodSchema } from "zod";
 import { OpenAIModel } from "../model/openAIModel.js";
 import type { GeminiModel } from "../model/geminiModel.js";
 import { sharedMemoryStore } from "../memory/memoryStore.js";
+import { withRetry, withTimeout } from "../utils/reliability.js";
+import { toClearMessage } from "../utils/errors.js";
+import { redactSecrets } from "../utils/secrets.js";
 
 interface AgentResult {
   finalOutput: string;
   messages: IConversations[];
   iterations: number;
-  stopReason: "completed" | "max_iterations";
+  stopReason: "completed" | "max_iterations" | "error";
 }
 
 export interface ITool<TInput, TResult> {
@@ -149,10 +152,23 @@ export class Agent {
       if (!this.agentConfig.model) {
         throw new Error("Model is not set");
       }
-      const rawLLMResponse = (await this.agentConfig.model.generate(
-        runContext.conversations,
-        effectiveInstructions,
-      )) as string;
+      let rawLLMResponse: string;
+      try {
+        rawLLMResponse = (await this.agentConfig.model.generate(
+          runContext.conversations,
+          effectiveInstructions,
+        )) as string;
+      } catch (error) {
+        const message = redactSecrets(toClearMessage(error));
+        console.log(`[${this.name}] Model call failed:`, message);
+        const result: AgentResult = {
+          finalOutput: `I couldn't complete this request because the model call failed: ${message}`,
+          messages: runContext.conversations,
+          iterations: currentIteration + 1,
+          stopReason: "error",
+        };
+        return result;
+      }
 
       console.log("Raw LLM Response:", rawLLMResponse);
 
@@ -162,9 +178,6 @@ export class Agent {
         const response = JSON.parse(rawLLMResponse);
         parsedLLMResponse = response;
       } catch (error) {
-        // console.log(
-        // "Initial JSON parsing failed, attempting to extract JSON from response",
-        // );
         // Try to extract JSON from markdown code blocks or other text
         const jsonMatch =
           rawLLMResponse.match(/```(?:json)?\s*([\s\S]*?)```/) ||
@@ -174,15 +187,18 @@ export class Agent {
           try {
             const extractedJson = jsonMatch[1] || jsonMatch[0];
             parsedLLMResponse = JSON.parse(extractedJson);
-            // console.log("Successfully extracted JSON from response");
           } catch (innerError) {
-            // console.error("Failed to parse extracted JSON:", innerError);
-            throw new Error("Could not parse response as JSON");
+            console.log(`[${this.name}] Could not parse extracted JSON, asking model to retry`);
           }
-        } else {
-          // console.error("No JSON found in response:", rawLLMResponse);
-          throw new Error("Response is not valid JSON");
         }
+      }
+
+      if (!parsedLLMResponse || typeof parsedLLMResponse.step !== "string") {
+        runContext.conversations.push({
+          role: "developer",
+          content: "Error: Response was not valid JSON matching the required pipeline format. Please respond again with ONLY valid JSON as instructed.",
+        });
+        continue;
       }
       // console.log("Parsed LLM Response:", parsedLLMResponse);
       if (parsedLLMResponse.step.toLowerCase() === "output") {
@@ -201,6 +217,7 @@ export class Agent {
         };
         return result;
       }
+
 
       if (parsedLLMResponse.step.toLowerCase() === "tool_request") {
         // console.log("inside tool request block");
@@ -230,7 +247,12 @@ export class Agent {
 
             continue;
           }
-          const toolResult = await tool.executor(parsed.data);
+          const toolResult = await withRetry(() => tool.executor(parsed.data), {
+            label: `tool:${functionName}`,
+            retries: 1,
+            baseDelayMs: 300,
+            timeoutMs: 15_000,
+          });
           // console.log(toolResult);
 
           runContext.conversations.push({
@@ -243,8 +265,7 @@ export class Agent {
             }),
           });
         } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
+          const errorMessage = redactSecrets(toClearMessage(error));
           // console.log("Tool Error", errorMessage);
           runContext.conversations.push({
             role: "developer",
@@ -291,13 +312,18 @@ export class Agent {
         }
 
         try {
-          const handoffResult = await targetAgent.run(input, {
-            conversations: runContext.conversations,
-            handoffDepth: runContext.handoffDepth + 1,
-            handoffHistory: [...runContext.handoffHistory, this.name],
-            runId: runContext.runId,
-            userId: runContext.userId,
-          });
+          const handoffResult = await withTimeout(
+            () =>
+              targetAgent.run(input, {
+                conversations: runContext.conversations,
+                handoffDepth: runContext.handoffDepth + 1,
+                handoffHistory: [...runContext.handoffHistory, this.name],
+                runId: runContext.runId,
+                userId: runContext.userId,
+              }),
+            60_000,
+            `handoff:${agentName}`,
+          );
           console.log(`[${this.name}] Handoff to "${agentName}" completed:`, handoffResult?.finalOutput);
           runContext.conversations.push({
             role: "developer",
@@ -309,8 +335,7 @@ export class Agent {
             }),
           });
         } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : String(error);
+          const errorMessage = redactSecrets(toClearMessage(error));
           console.log(`[${this.name}] Handoff to "${agentName}" errored:`, errorMessage);
           runContext.conversations.push({
             role: "developer",

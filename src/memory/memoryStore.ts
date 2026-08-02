@@ -1,8 +1,11 @@
 import "dotenv/config";
 import { MemoryClient } from "mem0ai";
+import { withTimeout } from "../utils/reliability.js";
+import { redactSecrets } from "../utils/secrets.js";
 
 const MEM0_API_KEY = process.env.MEM0_API_KEY;
 const MEM0_USER_ID = process.env.MEM0_USER_ID ?? "default-user";
+const MEM0_TIMEOUT_MS = 8_000;
 
 export interface MemoryContext {
   userId?: string | undefined;
@@ -31,26 +34,47 @@ export class MemoryStore {
   async recall(query: string, context: MemoryContext = {}, limit = 5): Promise<string[]> {
     if (!this.client) return [];
 
-    const results = await this.client.search(query, {
-      top_k: limit,
-      user_id: context.userId ?? MEM0_USER_ID,
-      ...(context.agentId ? { agent_id: context.agentId } : {}),
-      ...(context.runId ? { run_id: context.runId } : {}),
-    });
+    try {
+      const results = await withTimeout(
+        () =>
+          this.client!.search(query, {
+            top_k: limit,
+            user_id: context.userId ?? MEM0_USER_ID,
+            ...(context.agentId ? { agent_id: context.agentId } : {}),
+            ...(context.runId ? { run_id: context.runId } : {}),
+          }),
+        MEM0_TIMEOUT_MS,
+        "mem0.search",
+      );
 
-    return results
-      .map((item) => item.memory ?? item.data?.memory)
-      .filter((value): value is string => Boolean(value));
+      return results
+        .map((item) => item.memory ?? item.data?.memory)
+        .filter((value): value is string => Boolean(value));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(`[memory] recall failed, continuing without memories: ${redactSecrets(message)}`);
+      return [];
+    }
   }
 
   async remember(messages: MemoryMessage[], context: MemoryContext = {}): Promise<void> {
     if (!this.client || messages.length === 0) return;
 
-    await this.client.add(messages, {
-      user_id: context.userId ?? MEM0_USER_ID,
-      ...(context.agentId ? { agent_id: context.agentId } : {}),
-      ...(context.runId ? { run_id: context.runId } : {}),
-    });
+    try {
+      await withTimeout(
+        () =>
+          this.client!.add(messages, {
+            user_id: context.userId ?? MEM0_USER_ID,
+            ...(context.agentId ? { agent_id: context.agentId } : {}),
+            ...(context.runId ? { run_id: context.runId } : {}),
+          }),
+        MEM0_TIMEOUT_MS,
+        "mem0.add",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.log(`[memory] remember failed, continuing: ${redactSecrets(message)}`);
+    }
   }
 
   formatForPrompt(memories: string[]): string {
