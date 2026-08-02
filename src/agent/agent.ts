@@ -1,9 +1,11 @@
 import "dotenv/config";
+import { randomUUID } from "node:crypto";
 import { HARNESS_PROMPT } from "./config.js";
 import OpenAI from "openai";
 import type { ZodSchema } from "zod";
 import { OpenAIModel } from "../model/openAIModel.js";
 import type { GeminiModel } from "../model/geminiModel.js";
+import { sharedMemoryStore } from "../memory/memoryStore.js";
 
 interface AgentResult {
   finalOutput: string;
@@ -33,11 +35,13 @@ export interface IConversations {
   content: string;
 }
 
-// Per-run state threaded through an agent (and any handoffs it triggers), keeping Agent instances stateless/reusable.
+
 export interface IRunContext {
   conversations: IConversations[];
   handoffDepth: number;
   handoffHistory: string[];
+  runId: string;
+  userId?: string | undefined;
 }
 
 export class AgentBuilder {
@@ -123,13 +127,19 @@ export class Agent {
     return new AgentBuilder();
   }
 
-  public async run(userQuery: string, context?: IRunContext) {
+  public async run(userQuery: string, context?: IRunContext, userId?: string) {
     const runContext: IRunContext = context ?? {
       conversations: [],
       handoffDepth: 0,
       handoffHistory: [],
+      runId: randomUUID(),
+      userId,
     };
     runContext.conversations.push({ role: "user", content: userQuery });
+
+    const memoryContext = { userId: runContext.userId, agentId: this.name, runId: runContext.runId };
+    const memories = await sharedMemoryStore.recall(userQuery, memoryContext);
+    const effectiveInstructions = this.instructions + sharedMemoryStore.formatForPrompt(memories);
 
     for (
       let currentIteration = 0;
@@ -141,7 +151,7 @@ export class Agent {
       }
       const rawLLMResponse = (await this.agentConfig.model.generate(
         runContext.conversations,
-        this.instructions,
+        effectiveInstructions,
       )) as string;
 
       console.log("Raw LLM Response:", rawLLMResponse);
@@ -176,6 +186,13 @@ export class Agent {
       }
       // console.log("Parsed LLM Response:", parsedLLMResponse);
       if (parsedLLMResponse.step.toLowerCase() === "output") {
+        await sharedMemoryStore.remember(
+          [
+            { role: "user", content: userQuery },
+            { role: "assistant", content: parsedLLMResponse.text },
+          ],
+          memoryContext,
+        );
         const result: AgentResult = {
           finalOutput: parsedLLMResponse.text,
           messages: runContext.conversations,
@@ -278,6 +295,8 @@ export class Agent {
             conversations: runContext.conversations,
             handoffDepth: runContext.handoffDepth + 1,
             handoffHistory: [...runContext.handoffHistory, this.name],
+            runId: runContext.runId,
+            userId: runContext.userId,
           });
           console.log(`[${this.name}] Handoff to "${agentName}" completed:`, handoffResult?.finalOutput);
           runContext.conversations.push({
