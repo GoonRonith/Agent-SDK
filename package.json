@@ -4,7 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "cli": "tsx src/cli.ts",
+    "start": "node dist/cli.js"
   },
   "keywords": [],
   "author": "",

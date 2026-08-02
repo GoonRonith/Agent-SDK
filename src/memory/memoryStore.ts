@@ -36,12 +36,12 @@ export class MemoryStore {
 
     try {
       const results = await withTimeout(
+        // Scoped by user_id only: memories must survive across runs/agents, so run_id/agent_id
+        // (which are unique per call) must never be used to filter recall.
         () =>
           this.client!.search(query, {
             top_k: limit,
             user_id: context.userId ?? MEM0_USER_ID,
-            ...(context.agentId ? { agent_id: context.agentId } : {}),
-            ...(context.runId ? { run_id: context.runId } : {}),
           }),
         MEM0_TIMEOUT_MS,
         "mem0.search",

@@ -30,6 +30,10 @@ export const HARNESS_PROMPT = `
       If any Handoff agent's instructions/specialty match the user's request domain (e.g. a math agent for math questions,
       a billing agent for billing questions), you MUST use "HANDOFF" to delegate to that agent instead of solving it yourself,
       even if you are capable of solving it. Only solve it yourself if no matching Handoff agent exists.
+      This applies no matter how simple the request looks: basic arithmetic, percentages, fractions, ratios, unit
+      conversions, algebra, and word problems all count as "math" and must be handed off if a Math Agent (or similarly
+      named agent) is present in the Handoffs list. Do not decide a request is "too simple to hand off" — simplicity is
+      never a reason to solve it yourself when a matching Handoff agent exists.
 
     Example (no Handoffs available, so solve it yourself):
     - "USER": What is 2 + 2 - 5 * 10 / 3?
@@ -61,6 +65,21 @@ export const HARNESS_PROMPT = `
       - "HANDOFF": { "step": "HANDOFF", "agentName": "Math Agent", "input": "What is the result of 2 * 21 * 3?" }
       - "HANDOFF_OUTPUT": "The Math Agent computed the result as 126."
       - "OUTPUT": "The result of 2 * 21 * 3 is 126."
+
+    Example (even a simple/small calculation must still be handed off when a Math Agent is available):
+    - "USER": My salary is 1000 and I want to save 20% of it, what is 20% of it?
+
+      Handoffs:
+      { "agentName": "Math Agent", "instructions": "You are expert AI assistant for Math problem solving" }
+
+      OUTPUT:
+      - "INITAL": "The user wants me to calculate 20% of 1000"
+      - "THINK": "This is a percentage calculation, which counts as math. A Math Agent handoff is available, so I must not compute this myself even though it is simple"
+      - "ANALYSE": "This request should be delegated to Math Agent instead of computing it myself"
+      - "HANDOFF": { "step": "HANDOFF", "agentName": "Math Agent", "input": "What is 20% of 1000?" }
+      - "HANDOFF_OUTPUT": "The Math Agent computed the result as 200."
+      - "OUTPUT": "20% of 1000 is 200, so you'd be saving 200."
+
 
     Example:
     - "USER" what is weather of Goa?
@@ -115,7 +134,8 @@ export const HARNESS_PROMPT = `
     - Never pretend a tool was executed.
     - Never assume weather, stock prices, news, or any real-time information.
     - Before solving anything yourself, check the Handoffs list. If a listed agent specializes in the request's domain,
-      you MUST "HANDOFF" to it instead of solving the request yourself, regardless of whether you could solve it directly.
+      you MUST "HANDOFF" to it instead of solving the request yourself, regardless of whether you could solve it directly
+      or how simple/small the request appears.
     - Never pretend a handoff was executed. Never generate HANDOFF_OUTPUT yourself; it can only come from the runtime
       after the handoff agent has actually run.
     - If a required tool is not available, immediately output
