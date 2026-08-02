@@ -9,12 +9,14 @@ import { sharedMemoryStore } from "../memory/memoryStore.js";
 import { withRetry, withTimeout } from "../utils/reliability.js";
 import { toClearMessage } from "../utils/errors.js";
 import { redactSecrets } from "../utils/secrets.js";
+import { Tracer, type TraceEvent } from "../utils/tracing.js";
 
 interface AgentResult {
   finalOutput: string;
   messages: IConversations[];
   iterations: number;
   stopReason: "completed" | "max_iterations" | "error";
+  trace: TraceEvent[];
 }
 
 export interface ITool<TInput, TResult> {
@@ -45,6 +47,7 @@ export interface IRunContext {
   handoffHistory: string[];
   runId: string;
   userId?: string | undefined;
+  trace: Tracer;
 }
 
 export class AgentBuilder {
@@ -131,14 +134,21 @@ export class Agent {
   }
 
   public async run(userQuery: string, context?: IRunContext, userId?: string) {
+    const isRootRun = context === undefined;
     const runContext: IRunContext = context ?? {
       conversations: [],
       handoffDepth: 0,
       handoffHistory: [],
       runId: randomUUID(),
       userId,
+      trace: new Tracer(),
     };
     runContext.conversations.push({ role: "user", content: userQuery });
+
+    const finalize = (result: Omit<AgentResult, "trace">): AgentResult => {
+      if (isRootRun) runContext.trace.printSummary();
+      return { ...result, trace: runContext.trace.getEvents() };
+    };
 
     const memoryContext = { userId: runContext.userId, agentId: this.name, runId: runContext.runId };
     const memories = await sharedMemoryStore.recall(userQuery, memoryContext);
@@ -153,21 +163,29 @@ export class Agent {
         throw new Error("Model is not set");
       }
       let rawLLMResponse: string;
+      const modelCallTrace = runContext.trace.start({
+        runId: runContext.runId,
+        type: "model_call",
+        name: this.agentConfig.model.constructor.name,
+        agentName: this.name,
+        metadata: { iteration: currentIteration },
+      });
       try {
         rawLLMResponse = (await this.agentConfig.model.generate(
           runContext.conversations,
           effectiveInstructions,
         )) as string;
+        runContext.trace.end(modelCallTrace, "success");
       } catch (error) {
         const message = redactSecrets(toClearMessage(error));
+        runContext.trace.end(modelCallTrace, "error", { error: message });
         console.log(`[${this.name}] Model call failed:`, message);
-        const result: AgentResult = {
+        return finalize({
           finalOutput: `I couldn't complete this request because the model call failed: ${message}`,
           messages: runContext.conversations,
           iterations: currentIteration + 1,
           stopReason: "error",
-        };
-        return result;
+        });
       }
 
       console.log("Raw LLM Response:", rawLLMResponse);
@@ -209,13 +227,12 @@ export class Agent {
           ],
           memoryContext,
         );
-        const result: AgentResult = {
+        return finalize({
           finalOutput: parsedLLMResponse.text,
           messages: runContext.conversations,
           iterations: currentIteration + 1,
           stopReason: "completed",
-        };
-        return result;
+        });
       }
 
 
@@ -231,9 +248,17 @@ export class Agent {
           });
           continue;
         }
+        const toolTrace = runContext.trace.start({
+          runId: runContext.runId,
+          type: "tool_call",
+          name: functionName,
+          agentName: this.name,
+          metadata: { input },
+        });
         try {
           const parsed = tool.inputSchema.safeParse(input);
           if (!parsed.success) {
+            runContext.trace.end(toolTrace, "error", { error: "ValidationError" });
             runContext.conversations.push({
               role: "developer",
               content: JSON.stringify({
@@ -254,6 +279,7 @@ export class Agent {
             timeoutMs: 15_000,
           });
           // console.log(toolResult);
+          runContext.trace.end(toolTrace, "success");
 
           runContext.conversations.push({
             role: "developer",
@@ -266,6 +292,7 @@ export class Agent {
           });
         } catch (error) {
           const errorMessage = redactSecrets(toClearMessage(error));
+          runContext.trace.end(toolTrace, "error", { error: errorMessage });
           // console.log("Tool Error", errorMessage);
           runContext.conversations.push({
             role: "developer",
@@ -293,20 +320,32 @@ export class Agent {
           continue;
         }
 
+        const handoffTrace = runContext.trace.start({
+          runId: runContext.runId,
+          type: "handoff",
+          name: agentName,
+          agentName: this.name,
+          metadata: { input, handoffDepth: runContext.handoffDepth },
+        });
+
         if (runContext.handoffDepth >= this.MAX_HANDOFF_DEPTH) {
-          console.log(`[${this.name}] Handoff blocked: max handoff depth (${this.MAX_HANDOFF_DEPTH}) reached`);
+          const msg = `Max handoff depth (${this.MAX_HANDOFF_DEPTH}) reached, cannot hand off to ${agentName}`;
+          console.log(`[${this.name}] Handoff blocked: ${msg}`);
+          runContext.trace.end(handoffTrace, "error", { error: msg });
           runContext.conversations.push({
             role: "developer",
-            content: `Error: Max handoff depth (${this.MAX_HANDOFF_DEPTH}) reached, cannot hand off to ${agentName}`,
+            content: `Error: ${msg}`,
           });
           continue;
         }
 
         if (runContext.handoffHistory.includes(agentName)) {
+          const msg = `Handoff loop detected, ${agentName} already appears in the handoff chain [${runContext.handoffHistory.join(" -> ")}]`;
           console.log(`[${this.name}] Handoff blocked: loop detected in chain [${runContext.handoffHistory.join(" -> ")} -> ${agentName}]`);
+          runContext.trace.end(handoffTrace, "error", { error: msg });
           runContext.conversations.push({
             role: "developer",
-            content: `Error: Handoff loop detected, ${agentName} already appears in the handoff chain [${runContext.handoffHistory.join(" -> ")}]`,
+            content: `Error: ${msg}`,
           });
           continue;
         }
@@ -320,11 +359,13 @@ export class Agent {
                 handoffHistory: [...runContext.handoffHistory, this.name],
                 runId: runContext.runId,
                 userId: runContext.userId,
+                trace: runContext.trace,
               }),
             60_000,
             `handoff:${agentName}`,
           );
           console.log(`[${this.name}] Handoff to "${agentName}" completed:`, handoffResult?.finalOutput);
+          runContext.trace.end(handoffTrace, "success");
           runContext.conversations.push({
             role: "developer",
             content: JSON.stringify({
@@ -337,6 +378,7 @@ export class Agent {
         } catch (error) {
           const errorMessage = redactSecrets(toClearMessage(error));
           console.log(`[${this.name}] Handoff to "${agentName}" errored:`, errorMessage);
+          runContext.trace.end(handoffTrace, "error", { error: errorMessage });
           runContext.conversations.push({
             role: "developer",
             content: JSON.stringify({
@@ -351,13 +393,12 @@ export class Agent {
       }
 
       if (currentIteration === this.MAX_ITERATION) {
-        const result: AgentResult = {
+        return finalize({
           finalOutput: "Max Iteration Reached",
           messages: runContext.conversations,
           iterations: currentIteration + 1,
           stopReason: "max_iterations",
-        };
-        return result;
+        });
       }
 
       runContext.conversations.push({
