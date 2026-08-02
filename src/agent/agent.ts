@@ -133,7 +133,7 @@ export class Agent {
     return new AgentBuilder();
   }
 
-  public async run(userQuery: string, context?: IRunContext, userId?: string) {
+  public async run(userQuery: string, context?: IRunContext, userId?: string, traceEnabled = false) {
     const isRootRun = context === undefined;
     const runContext: IRunContext = context ?? {
       conversations: [],
@@ -141,7 +141,7 @@ export class Agent {
       handoffHistory: [],
       runId: randomUUID(),
       userId,
-      trace: new Tracer(),
+      trace: new Tracer(traceEnabled),
     };
     runContext.conversations.push({ role: "user", content: userQuery });
 

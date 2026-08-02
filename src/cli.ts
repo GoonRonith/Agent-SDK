@@ -55,15 +55,19 @@ async function main() {
   const userId = process.env.MEM0_USER_ID ?? randomUUID();
 
   const args = process.argv.slice(2);
+  const traceFlagIndex = args.findIndex((a) => a === "--trace" || a === "-t");
+  let traceEnabled = traceFlagIndex !== -1;
+  if (traceFlagIndex !== -1) args.splice(traceFlagIndex, 1);
+
   if (args.length > 0) {
     const query = args.join(" ");
-    const result = await mainAgent.run(query, undefined, userId);
+    const result = await mainAgent.run(query, undefined, userId, traceEnabled);
     console.log(result?.finalOutput ?? "No output produced.");
     return;
   }
 
   const rl = readline.createInterface({ input, output });
-  console.log('Agent SDK CLI - type your message, "exit" to quit.\n');
+  console.log('Agent SDK CLI - type your message, "exit" to quit, "/trace on|off" to toggle tracing.\n');
 
   try {
     while (true) {
@@ -71,7 +75,13 @@ async function main() {
       if (!query) continue;
       if (query.toLowerCase() === "exit" || query.toLowerCase() === "quit") break;
 
-      const result = await mainAgent.run(query, undefined, userId);
+      if (query.toLowerCase() === "/trace on" || query.toLowerCase() === "/trace off") {
+        traceEnabled = query.toLowerCase() === "/trace on";
+        console.log(`Tracing ${traceEnabled ? "enabled" : "disabled"}.\n`);
+        continue;
+      }
+
+      const result = await mainAgent.run(query, undefined, userId, traceEnabled);
       console.log(`Agent: ${result?.finalOutput ?? "No output produced."}\n`);
     }
   } finally {
@@ -83,3 +93,4 @@ main().catch((error) => {
   console.error("CLI failed:", error);
   process.exitCode = 1;
 });
+

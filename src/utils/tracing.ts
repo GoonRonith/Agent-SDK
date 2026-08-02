@@ -25,13 +25,22 @@ export interface StartTraceParams {
   metadata?: Record<string, unknown>;
 }
 
-/** Records timed, structured events (model calls, tool calls, handoffs) for a run and can print/export them for debugging. */
+/** Records timed, structured events (model calls, tool calls, handoffs) for a run and can print/export them for debugging. Off by default - callers opt in. */
 export class Tracer {
   private events: TraceEvent[] = [];
 
-  constructor(private verbose = true) {}
+  constructor(private enabled = false) {}
 
-  start(params: StartTraceParams): TraceEvent {
+  setEnabled(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
+  isEnabled(): boolean {
+    return this.enabled;
+  }
+
+  start(params: StartTraceParams): TraceEvent | null {
+    if (!this.enabled) return null;
     const event: TraceEvent = {
       id: randomUUID(),
       runId: params.runId,
@@ -43,30 +52,27 @@ export class Tracer {
       ...(params.metadata ? { metadata: params.metadata } : {}),
     };
     this.events.push(event);
-    if (this.verbose) {
-      console.log(`[trace] -> ${event.type}:${event.name} (agent=${event.agentName})`);
-    }
+    console.log(`[trace] -> ${event.type}:${event.name} (agent=${event.agentName})`);
     return event;
   }
 
   end(
-    event: TraceEvent,
+    event: TraceEvent | null,
     status: Exclude<TraceEventStatus, "started">,
     extra?: { error?: string; metadata?: Record<string, unknown> },
   ): void {
+    if (!event) return;
     event.endedAt = Date.now();
     event.durationMs = event.endedAt - event.startedAt;
     event.status = status;
     if (extra?.error) event.error = extra.error;
     if (extra?.metadata) event.metadata = { ...event.metadata, ...extra.metadata };
 
-    if (this.verbose) {
-      const icon = status === "success" ? "OK" : "FAIL";
-      const suffix = extra?.error ? ` - ${extra.error}` : "";
-      console.log(
-        `[trace] <- ${event.type}:${event.name} (agent=${event.agentName}) ${icon} in ${event.durationMs}ms${suffix}`,
-      );
-    }
+    const icon = status === "success" ? "OK" : "FAIL";
+    const suffix = extra?.error ? ` - ${extra.error}` : "";
+    console.log(
+      `[trace] <- ${event.type}:${event.name} (agent=${event.agentName}) ${icon} in ${event.durationMs}ms${suffix}`,
+    );
   }
 
   /** Runs fn as a traced span: records start/end, timing and error automatically. */
@@ -88,7 +94,7 @@ export class Tracer {
   }
 
   printSummary(): void {
-    if (this.events.length === 0) return;
+    if (!this.enabled || this.events.length === 0) return;
     const totalMs = this.events.reduce((sum, e) => sum + (e.durationMs ?? 0), 0);
     const errorCount = this.events.filter((e) => e.status === "error").length;
     console.log(
