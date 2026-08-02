@@ -21,9 +21,11 @@ export interface ITool<TInput, TResult> {
 }
 
 interface IAgentConfig {
+  name: string;
   instructions: string;
   tools: ITool<any, any>[];
   model: OpenAIModel | GeminiModel | null;
+  handoffs?: Agent[]
 }
 
 export interface IConversations {
@@ -33,6 +35,7 @@ export interface IConversations {
 
 export class AgentBuilder {
   private agentConfig: IAgentConfig = {
+    name: "",
     instructions: "",
     tools: [],
     model: null,
@@ -48,8 +51,21 @@ export class AgentBuilder {
     return this;
   }
 
+  public setName(name: string) {
+    this.agentConfig.name = name;
+    return this;
+  }
+
   public setInstructions(instructions: string) {
     this.agentConfig.instructions = instructions;
+    return this;
+  }
+
+  public setHandOffs(handOffs: Agent[]) {
+    this.agentConfig.handoffs = [
+      ...(this.agentConfig.handoffs || []),
+      ...handOffs,
+    ];
     return this;
   }
 
@@ -64,17 +80,15 @@ export class AgentBuilder {
 }
 
 export class Agent {
+  private name: string;
   private instructions: string;
-  private openai: OpenAI;
   private conversations: IConversations[];
   private toolMapping: Map<string, ITool<any, any>>;
+  private handoffMapping: Map<string, Agent>;
   private MAX_ITERATION = 30;
+  private handoffs: Agent[]
 
   constructor(private agentConfig: IAgentConfig) {
-    this.openai = new OpenAI({
-      apiKey: process.env.OPENAI_API_KEY,
-    });
-
     this.instructions = `
         ${HARNESS_PROMPT}\n\n
         
@@ -83,13 +97,19 @@ export class Agent {
 
         Available Tools:
         ${agentConfig.tools.map((t) => JSON.stringify({ functionName: t.name, functionDescription: t.desc, functionDoc: t.doc, inputSchema: t.inputSchema })).join("\n")}
+        Handoffs:
+        ${agentConfig.handoffs?.map((h) => JSON.stringify({ instructions: h.agentConfig.instructions, agentName: h.agentConfig.name })).join("\n")}
     `;
-
+    this.name = agentConfig.name;
     this.conversations = [];
-
+    this.handoffs = agentConfig.handoffs || []
     this.toolMapping = new Map();
     for (const tool of agentConfig.tools) {
       this.toolMapping.set(tool.name, tool);
+    }
+    this.handoffMapping = new Map();
+    for (const handoff of this.handoffs) {
+      this.handoffMapping.set(handoff.agentConfig.name, handoff);
     }
   }
 
@@ -113,7 +133,7 @@ export class Agent {
         this.instructions,
       )) as string;
 
-      // console.log("Raw LLM Response:", rawLLMResponse);
+      console.log("Raw LLM Response:", rawLLMResponse);
 
       this.conversations.push({ role: "assistant", content: rawLLMResponse });
       let parsedLLMResponse = null;
@@ -122,9 +142,8 @@ export class Agent {
         parsedLLMResponse = response;
       } catch (error) {
         // console.log(
-          // "Initial JSON parsing failed, attempting to extract JSON from response",
+        // "Initial JSON parsing failed, attempting to extract JSON from response",
         // );
-
         // Try to extract JSON from markdown code blocks or other text
         const jsonMatch =
           rawLLMResponse.match(/```(?:json)?\s*([\s\S]*?)```/) ||
@@ -206,6 +225,47 @@ export class Agent {
               functionName,
               input,
               errorType: "ExecutionError",
+              error: errorMessage,
+            }),
+          });
+        }
+      }
+
+      if (parsedLLMResponse.step.toLowerCase() === "handoff") {
+        const { agentName, input } = parsedLLMResponse;
+        console.log(`[${this.name}] Handing off to "${agentName}" with input:`, input);
+        const targetAgent = this.handoffMapping.get(agentName);
+        if (!targetAgent) {
+          console.log(`[${this.name}] Handoff failed: agent "${agentName}" not found`);
+          this.conversations.push({
+            role: "developer",
+            content: `Error: Handoff agent with name ${agentName} does not exist`,
+          });
+          continue;
+        }
+        try {
+          const handoffResult = await targetAgent.run(input);
+          console.log(`[${this.name}] Handoff to "${agentName}" completed:`, handoffResult?.finalOutput);
+          this.conversations.push({
+            role: "developer",
+            content: JSON.stringify({
+              success: true,
+              agentName,
+              input,
+              handoffResult: handoffResult?.finalOutput,
+            }),
+          });
+        } catch (error) {
+          const errorMessage =
+            error instanceof Error ? error.message : String(error);
+          console.log(`[${this.name}] Handoff to "${agentName}" errored:`, errorMessage);
+          this.conversations.push({
+            role: "developer",
+            content: JSON.stringify({
+              success: false,
+              agentName,
+              input,
+              errorType: "HandoffError",
               error: errorMessage,
             }),
           });
