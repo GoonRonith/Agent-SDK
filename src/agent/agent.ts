@@ -33,6 +33,13 @@ export interface IConversations {
   content: string;
 }
 
+// Per-run state threaded through an agent (and any handoffs it triggers), keeping Agent instances stateless/reusable.
+export interface IRunContext {
+  conversations: IConversations[];
+  handoffDepth: number;
+  handoffHistory: string[];
+}
+
 export class AgentBuilder {
   private agentConfig: IAgentConfig = {
     name: "",
@@ -82,10 +89,10 @@ export class AgentBuilder {
 export class Agent {
   private name: string;
   private instructions: string;
-  private conversations: IConversations[];
   private toolMapping: Map<string, ITool<any, any>>;
   private handoffMapping: Map<string, Agent>;
   private MAX_ITERATION = 30;
+  private MAX_HANDOFF_DEPTH = 5;
   private handoffs: Agent[]
 
   constructor(private agentConfig: IAgentConfig) {
@@ -101,7 +108,6 @@ export class Agent {
         ${agentConfig.handoffs?.map((h) => JSON.stringify({ instructions: h.agentConfig.instructions, agentName: h.agentConfig.name })).join("\n")}
     `;
     this.name = agentConfig.name;
-    this.conversations = [];
     this.handoffs = agentConfig.handoffs || []
     this.toolMapping = new Map();
     for (const tool of agentConfig.tools) {
@@ -117,8 +123,13 @@ export class Agent {
     return new AgentBuilder();
   }
 
-  public async run(userQuery: string) {
-    this.conversations.push({ role: "user", content: userQuery });
+  public async run(userQuery: string, context?: IRunContext) {
+    const runContext: IRunContext = context ?? {
+      conversations: [],
+      handoffDepth: 0,
+      handoffHistory: [],
+    };
+    runContext.conversations.push({ role: "user", content: userQuery });
 
     for (
       let currentIteration = 0;
@@ -129,13 +140,13 @@ export class Agent {
         throw new Error("Model is not set");
       }
       const rawLLMResponse = (await this.agentConfig.model.generate(
-        this.conversations,
+        runContext.conversations,
         this.instructions,
       )) as string;
 
       console.log("Raw LLM Response:", rawLLMResponse);
 
-      this.conversations.push({ role: "assistant", content: rawLLMResponse });
+      runContext.conversations.push({ role: "assistant", content: rawLLMResponse });
       let parsedLLMResponse = null;
       try {
         const response = JSON.parse(rawLLMResponse);
@@ -167,7 +178,7 @@ export class Agent {
       if (parsedLLMResponse.step.toLowerCase() === "output") {
         const result: AgentResult = {
           finalOutput: parsedLLMResponse.text,
-          messages: this.conversations,
+          messages: runContext.conversations,
           iterations: currentIteration + 1,
           stopReason: "completed",
         };
@@ -180,7 +191,7 @@ export class Agent {
         const { functionName, input } = parsedLLMResponse;
         const tool = this.toolMapping.get(functionName);
         if (!tool) {
-          this.conversations.push({
+          runContext.conversations.push({
             role: "developer",
             content: `Error: Function with name ${functionName} does not exists`,
           });
@@ -189,7 +200,7 @@ export class Agent {
         try {
           const parsed = tool.inputSchema.safeParse(input);
           if (!parsed.success) {
-            this.conversations.push({
+            runContext.conversations.push({
               role: "developer",
               content: JSON.stringify({
                 success: false,
@@ -205,7 +216,7 @@ export class Agent {
           const toolResult = await tool.executor(parsed.data);
           // console.log(toolResult);
 
-          this.conversations.push({
+          runContext.conversations.push({
             role: "developer",
             content: JSON.stringify({
               success: true,
@@ -218,7 +229,7 @@ export class Agent {
           const errorMessage =
             error instanceof Error ? error.message : String(error);
           // console.log("Tool Error", errorMessage);
-          this.conversations.push({
+          runContext.conversations.push({
             role: "developer",
             content: JSON.stringify({
               success: false,
@@ -237,16 +248,39 @@ export class Agent {
         const targetAgent = this.handoffMapping.get(agentName);
         if (!targetAgent) {
           console.log(`[${this.name}] Handoff failed: agent "${agentName}" not found`);
-          this.conversations.push({
+          runContext.conversations.push({
             role: "developer",
             content: `Error: Handoff agent with name ${agentName} does not exist`,
           });
           continue;
         }
+
+        if (runContext.handoffDepth >= this.MAX_HANDOFF_DEPTH) {
+          console.log(`[${this.name}] Handoff blocked: max handoff depth (${this.MAX_HANDOFF_DEPTH}) reached`);
+          runContext.conversations.push({
+            role: "developer",
+            content: `Error: Max handoff depth (${this.MAX_HANDOFF_DEPTH}) reached, cannot hand off to ${agentName}`,
+          });
+          continue;
+        }
+
+        if (runContext.handoffHistory.includes(agentName)) {
+          console.log(`[${this.name}] Handoff blocked: loop detected in chain [${runContext.handoffHistory.join(" -> ")} -> ${agentName}]`);
+          runContext.conversations.push({
+            role: "developer",
+            content: `Error: Handoff loop detected, ${agentName} already appears in the handoff chain [${runContext.handoffHistory.join(" -> ")}]`,
+          });
+          continue;
+        }
+
         try {
-          const handoffResult = await targetAgent.run(input);
+          const handoffResult = await targetAgent.run(input, {
+            conversations: runContext.conversations,
+            handoffDepth: runContext.handoffDepth + 1,
+            handoffHistory: [...runContext.handoffHistory, this.name],
+          });
           console.log(`[${this.name}] Handoff to "${agentName}" completed:`, handoffResult?.finalOutput);
-          this.conversations.push({
+          runContext.conversations.push({
             role: "developer",
             content: JSON.stringify({
               success: true,
@@ -259,7 +293,7 @@ export class Agent {
           const errorMessage =
             error instanceof Error ? error.message : String(error);
           console.log(`[${this.name}] Handoff to "${agentName}" errored:`, errorMessage);
-          this.conversations.push({
+          runContext.conversations.push({
             role: "developer",
             content: JSON.stringify({
               success: false,
@@ -275,14 +309,14 @@ export class Agent {
       if (currentIteration === this.MAX_ITERATION) {
         const result: AgentResult = {
           finalOutput: "Max Iteration Reached",
-          messages: this.conversations,
+          messages: runContext.conversations,
           iterations: currentIteration + 1,
           stopReason: "max_iterations",
         };
         return result;
       }
 
-      this.conversations.push({
+      runContext.conversations.push({
         role: "user",
         content: "Continue with the next pipeline step.",
       });
