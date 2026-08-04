@@ -48,13 +48,13 @@ const weatherAgent: Agent = Agent.builder()
   .setInstructions("You are expert AI assistant for fetching weather data")
   .build();
 
-const myAgent2: Agent = Agent.builder()
+const myAgent: Agent = Agent.builder()
   .setName("Main Agent")
   .setModel(openAIModelTest)
   .setHandOffs([mathAgent, weatherAgent])
   .setInstructions("You are expert AI assistant")
   .build();
 
-const response2 = await myAgent2.run("What is the weather of kolkata ?");
+const response2 = await myAgent.run("What is the weather of kolkata ?");
 
 console.log(response2?.finalOutput);
